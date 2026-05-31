@@ -6,7 +6,7 @@ import os
 
 app = FastAPI()
 
-app.add_middleware(          # ← ഇതും add ചെയ്യുക
+app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
@@ -34,6 +34,11 @@ class Message(BaseModel):
     sender: str
     receiver: str
     text: str
+
+@app.get("/users")
+def get_users():
+    users = load(USERS_FILE)
+    return [u["username"] for u in users]
 
 @app.post("/register")
 def register(user: User):

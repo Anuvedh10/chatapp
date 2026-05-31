@@ -56,3 +56,22 @@ def get_chat(user1: str, user2: str):
         {"_id": 0}
     )
     return list(msgs)
+
+@app.get("/users")
+def get_users():
+    users = users_col.find({}, {"_id": 0, "username": 1})
+    return [u["username"] for u in users]
+
+@app.get("/conversations/{username}")
+def get_conversations(username: str):
+    msgs = messages_col.find(
+        {"$or": [{"sender": username}, {"receiver": username}]},
+        {"_id": 0}
+    )
+    contacts = set()
+    for m in msgs:
+        if m["sender"] == username:
+            contacts.add(m["receiver"])
+        else:
+            contacts.add(m["sender"])
+    return list(contacts)

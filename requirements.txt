@@ -1,4 +1,3 @@
 fastapi
 uvicorn
-pymongo
-bson
+pymongo[srv]

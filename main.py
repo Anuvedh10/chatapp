@@ -6,9 +6,10 @@ from pymongo import MongoClient
 from bson import ObjectId
 import os
 import datetime
+import firebase_admin
+from firebase_admin import credentials, messaging
 
 app = FastAPI()
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,10 +17,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# MongoDB
 client = MongoClient(os.environ["MONGO_URI"])
 db = client["chatapp"]
 users_col = db["users"]
 messages_col = db["messages"]
+tokens_col = db["tokens"]
+
+# Firebase Admin Init
+cred = credentials.Certificate("serviceAccountKey.json")
+firebase_admin.initialize_app(cred)
 
 class User(BaseModel):
     username: str
@@ -30,6 +37,11 @@ class Message(BaseModel):
     receiver: str
     text: str
 
+class TokenData(BaseModel):
+    username: str
+    token: str
+
+# ── Auth ──────────────────────────────────────────────
 @app.post("/register")
 def register(user: User):
     if users_col.find_one({"username": user.username}):
@@ -44,6 +56,7 @@ def login(user: User):
         raise HTTPException(status_code=401, detail="Invalid Username or Password")
     return {"message": "Login Successful"}
 
+# ── Users ─────────────────────────────────────────────
 @app.get("/users")
 def get_users():
     users = users_col.find({}, {"_id": 0, "username": 1})
@@ -63,6 +76,51 @@ def get_conversations(username: str):
             contacts.add(m["sender"])
     return list(contacts)
 
+# ── FCM Token Register ────────────────────────────────
+@app.post("/register-token")
+def register_token(data: TokenData):
+    tokens_col.update_one(
+        {"username": data.username},
+        {"$set": {"username": data.username, "token": data.token}},
+        upsert=True
+    )
+    return {"status": "ok"}
+
+# ── Push Notification Helper ──────────────────────────
+def send_push(receiver: str, sender: str, text: str):
+    try:
+        doc = tokens_col.find_one({"username": receiver})
+        if not doc or not doc.get("token"):
+            return
+        # Reply message ആണെങ്കിൽ preview clean ആക്കുക
+        preview = text
+        if text.startswith("↩ ") and "\n" in text:
+            preview = text.split("\n", 1)[1]
+
+        message = messaging.Message(
+            notification=messaging.Notification(
+                title=sender,
+                body=preview[:100],
+            ),
+            android=messaging.AndroidConfig(
+                priority="high",
+                notification=messaging.AndroidNotification(
+                    channel_id="chatapp_channel",
+                    sound="default",
+                ),
+            ),
+            apns=messaging.APNSConfig(
+                payload=messaging.APNSPayload(
+                    aps=messaging.Aps(sound="default"),
+                ),
+            ),
+            token=doc["token"],
+        )
+        messaging.send(message)
+    except Exception as e:
+        print(f"Push failed: {e}")
+
+# ── Messages ──────────────────────────────────────────
 @app.post("/send")
 def send_message(msg: Message):
     doc = {
@@ -74,6 +132,8 @@ def send_message(msg: Message):
         "deleted": False,
     }
     result = messages_col.insert_one(doc)
+    # Push notification to receiver
+    send_push(msg.receiver, msg.sender, msg.text)
     return {"message": "sent", "id": str(result.inserted_id)}
 
 @app.get("/chat/{user1}/{user2}")
@@ -118,6 +178,7 @@ def delete_message(message_id: str):
     except:
         raise HTTPException(status_code=400, detail="Invalid message id")
 
+# ── Typing ────────────────────────────────────────────
 @app.get("/typing/{sender}/{receiver}")
 def typing_status(sender: str, receiver: str):
     key = f"{sender}_to_{receiver}"

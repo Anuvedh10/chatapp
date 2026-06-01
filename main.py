@@ -44,8 +44,8 @@ class Message(BaseModel):
     sender: str
     receiver: str
     text: str
-    type: Optional[str] = "text"      # "text" or "voice"
-    audioData: Optional[str] = None   # base64 audio string
+    type: Optional[str] = "text"
+    audioData: Optional[str] = None
 
 class TypingStatus(BaseModel):
     sender: str
@@ -73,6 +73,17 @@ def login(user: User):
 def get_users():
     users = load(USERS_FILE)
     return [u["username"] for u in users]
+
+@app.get("/conversations/{username}")
+def get_conversations(username: str):
+    messages = load(MESSAGES_FILE)
+    users = set()
+    for msg in messages:
+        if msg.get("sender") == username:
+            users.add(msg["receiver"])
+        elif msg.get("receiver") == username:
+            users.add(msg["sender"])
+    return list(users)
 
 @app.post("/send")
 def send_message(msg: Message):

@@ -1,11 +1,13 @@
 # main.py
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pymongo import MongoClient
 from bson import ObjectId
 import os
 import datetime
+import shutil
 import firebase_admin
 from firebase_admin import credentials, messaging
 
@@ -25,8 +27,12 @@ messages_col = db["messages"]
 tokens_col = db["tokens"]
 
 # Firebase Admin Init
-cred = credentials.Certificate("serviceAccountKey.json")
+cred = credentials.Certificate("/etc/secrets/serviceAccountKey.json")
 firebase_admin.initialize_app(cred)
+
+# Uploads folder
+os.makedirs("uploads", exist_ok=True)
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 class User(BaseModel):
     username: str
@@ -92,10 +98,14 @@ def send_push(receiver: str, sender: str, text: str):
         doc = tokens_col.find_one({"username": receiver})
         if not doc or not doc.get("token"):
             return
-        # Reply message ആണെങ്കിൽ preview clean ആക്കുക
         preview = text
         if text.startswith("↩ ") and "\n" in text:
             preview = text.split("\n", 1)[1]
+        # Media preview
+        if text.startswith("[IMAGE]:"):
+            preview = "📷 Photo"
+        elif text.startswith("[VIDEO]:"):
+            preview = "🎥 Video"
 
         message = messaging.Message(
             notification=messaging.Notification(
@@ -132,9 +142,48 @@ def send_message(msg: Message):
         "deleted": False,
     }
     result = messages_col.insert_one(doc)
-    # Push notification to receiver
     send_push(msg.receiver, msg.sender, msg.text)
     return {"message": "sent", "id": str(result.inserted_id)}
+
+# ── Media Upload ──────────────────────────────────────
+@app.post("/upload")
+async def upload_file(
+    sender: str = Form(...),
+    receiver: str = Form(...),
+    file: UploadFile = File(...)
+):
+    try:
+        ext = file.filename.split(".")[-1].lower()
+        allowed = ["jpg", "jpeg", "png", "gif", "webp", "mp4", "mov", "avi", "mkv"]
+        if ext not in allowed:
+            raise HTTPException(status_code=400, detail="File type not allowed")
+
+        timestamp = datetime.datetime.utcnow().timestamp()
+        filename = f"{timestamp}_{sender}.{ext}"
+        path = f"uploads/{filename}"
+
+        with open(path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+        file_url = f"https://chatapp-1tcs.onrender.com/uploads/{filename}"
+        is_video = ext in ["mp4", "mov", "avi", "mkv"]
+        msg_text = f"{'[VIDEO]' if is_video else '[IMAGE]'}:{file_url}"
+
+        doc = {
+            "sender": sender,
+            "receiver": receiver,
+            "text": msg_text,
+            "timestamp": datetime.datetime.utcnow().isoformat(),
+            "read": False,
+            "deleted": False,
+        }
+        result = messages_col.insert_one(doc)
+        send_push(receiver, sender, msg_text)
+        return {"message": "uploaded", "id": str(result.inserted_id)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/chat/{user1}/{user2}")
 def get_chat(user1: str, user2: str):

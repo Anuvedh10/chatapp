@@ -1,13 +1,13 @@
 # main.py
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pymongo import MongoClient
 from bson import ObjectId
 import os
 import datetime
-import shutil
+import cloudinary
+import cloudinary.uploader
 import firebase_admin
 from firebase_admin import credentials, messaging
 
@@ -30,9 +30,12 @@ tokens_col = db["tokens"]
 cred = credentials.Certificate("/etc/secrets/serviceAccountKey.json")
 firebase_admin.initialize_app(cred)
 
-# Uploads folder
-os.makedirs("uploads", exist_ok=True)
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+# Cloudinary Init
+cloudinary.config(
+    cloud_name=os.environ["CLOUDINARY_CLOUD_NAME"],
+    api_key=os.environ["CLOUDINARY_API_KEY"],
+    api_secret=os.environ["CLOUDINARY_API_SECRET"],
+)
 
 class User(BaseModel):
     username: str
@@ -101,7 +104,6 @@ def send_push(receiver: str, sender: str, text: str):
         preview = text
         if text.startswith("↩ ") and "\n" in text:
             preview = text.split("\n", 1)[1]
-        # Media preview
         if text.startswith("[IMAGE]:"):
             preview = "📷 Photo"
         elif text.startswith("[VIDEO]:"):
@@ -145,7 +147,7 @@ def send_message(msg: Message):
     send_push(msg.receiver, msg.sender, msg.text)
     return {"message": "sent", "id": str(result.inserted_id)}
 
-# ── Media Upload ──────────────────────────────────────
+# ── Media Upload (Cloudinary) ─────────────────────────
 @app.post("/upload")
 async def upload_file(
     sender: str = Form(...),
@@ -154,19 +156,26 @@ async def upload_file(
 ):
     try:
         ext = file.filename.split(".")[-1].lower()
-        allowed = ["jpg", "jpeg", "png", "gif", "webp", "mp4", "mov", "avi", "mkv"]
+        allowed_image = ["jpg", "jpeg", "png", "gif", "webp"]
+        allowed_video = ["mp4", "mov", "avi", "mkv"]
+        allowed = allowed_image + allowed_video
+
         if ext not in allowed:
             raise HTTPException(status_code=400, detail="File type not allowed")
 
-        timestamp = datetime.datetime.utcnow().timestamp()
-        filename = f"{timestamp}_{sender}.{ext}"
-        path = f"uploads/{filename}"
+        is_video = ext in allowed_video
+        resource_type = "video" if is_video else "image"
 
-        with open(path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
+        # Upload to Cloudinary
+        file_bytes = await file.read()
+        result = cloudinary.uploader.upload(
+            file_bytes,
+            resource_type=resource_type,
+            folder="chatapp",
+            public_id=f"{sender}_{datetime.datetime.utcnow().timestamp()}",
+        )
 
-        file_url = f"https://chatapp-1tcs.onrender.com/uploads/{filename}"
-        is_video = ext in ["mp4", "mov", "avi", "mkv"]
+        file_url = result["secure_url"]
         msg_text = f"{'[VIDEO]' if is_video else '[IMAGE]'}:{file_url}"
 
         doc = {
@@ -177,9 +186,10 @@ async def upload_file(
             "read": False,
             "deleted": False,
         }
-        result = messages_col.insert_one(doc)
+        insert_result = messages_col.insert_one(doc)
         send_push(receiver, sender, msg_text)
-        return {"message": "uploaded", "id": str(result.inserted_id)}
+        return {"message": "uploaded", "id": str(insert_result.inserted_id), "url": file_url}
+
     except HTTPException:
         raise
     except Exception as e:

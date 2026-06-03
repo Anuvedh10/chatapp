@@ -50,6 +50,18 @@ class TokenData(BaseModel):
     username: str
     token: str
 
+class ReactionData(BaseModel):
+    username: str
+    emoji: str
+
+class EditData(BaseModel):
+    text: str
+
+class ForwardData(BaseModel):
+    sender: str
+    receiver: str
+    text: str
+
 # ── Auth ──────────────────────────────────────────────
 @app.post("/register")
 def register(user: User):
@@ -95,6 +107,11 @@ def register_token(data: TokenData):
     )
     return {"status": "ok"}
 
+# ── Version ───────────────────────────────────────────
+@app.get("/version")
+def get_version():
+    return {"min_version": "1.0.0", "latest_version": "1.0.0"}
+
 # ── Push Notification Helper ──────────────────────────
 def send_push(receiver: str, sender: str, text: str):
     try:
@@ -108,6 +125,10 @@ def send_push(receiver: str, sender: str, text: str):
             preview = "📷 Photo"
         elif text.startswith("[VIDEO]:"):
             preview = "🎥 Video"
+        elif text.startswith("[VOICE]:"):
+            preview = "🎤 Voice message"
+        elif text.startswith("[FORWARD]:"):
+            preview = "↪ Forwarded: " + text.replace("[FORWARD]:", "")[:50]
 
         message = messaging.Message(
             notification=messaging.Notification(
@@ -142,58 +163,12 @@ def send_message(msg: Message):
         "timestamp": datetime.datetime.utcnow().isoformat(),
         "read": False,
         "deleted": False,
+        "edited": False,
+        "reactions": {},
     }
     result = messages_col.insert_one(doc)
     send_push(msg.receiver, msg.sender, msg.text)
     return {"message": "sent", "id": str(result.inserted_id)}
-
-# ── Media Upload (Cloudinary) ─────────────────────────
-@app.post("/upload")
-async def upload_file(
-    sender: str = Form(...),
-    receiver: str = Form(...),
-    file: UploadFile = File(...)
-):
-    try:
-        ext = file.filename.split(".")[-1].lower()
-        allowed_image = ["jpg", "jpeg", "png", "gif", "webp"]
-        allowed_video = ["mp4", "mov", "avi", "mkv"]
-        allowed = allowed_image + allowed_video
-
-        if ext not in allowed:
-            raise HTTPException(status_code=400, detail="File type not allowed")
-
-        is_video = ext in allowed_video
-        resource_type = "video" if is_video else "image"
-
-        # Upload to Cloudinary
-        file_bytes = await file.read()
-        result = cloudinary.uploader.upload(
-            file_bytes,
-            resource_type=resource_type,
-            folder="chatapp",
-            public_id=f"{sender}_{datetime.datetime.utcnow().timestamp()}",
-        )
-
-        file_url = result["secure_url"]
-        msg_text = f"{'[VIDEO]' if is_video else '[IMAGE]'}:{file_url}"
-
-        doc = {
-            "sender": sender,
-            "receiver": receiver,
-            "text": msg_text,
-            "timestamp": datetime.datetime.utcnow().isoformat(),
-            "read": False,
-            "deleted": False,
-        }
-        insert_result = messages_col.insert_one(doc)
-        send_push(receiver, sender, msg_text)
-        return {"message": "uploaded", "id": str(insert_result.inserted_id), "url": file_url}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/chat/{user1}/{user2}")
 def get_chat(user1: str, user2: str):
@@ -215,6 +190,8 @@ def get_chat(user1: str, user2: str):
             "text": m["text"],
             "timestamp": m.get("timestamp", ""),
             "read": m.get("read", False),
+            "edited": m.get("edited", False),
+            "reactions": m.get("reactions", {}),
         })
     return result
 
@@ -236,6 +213,144 @@ def delete_message(message_id: str):
         return {"message": "deleted"}
     except:
         raise HTTPException(status_code=400, detail="Invalid message id")
+
+# ── Edit Message ──────────────────────────────────────
+@app.put("/message/{message_id}/edit")
+def edit_message(message_id: str, data: EditData):
+    try:
+        messages_col.update_one(
+            {"_id": ObjectId(message_id)},
+            {"$set": {"text": data.text, "edited": True}}
+        )
+        return {"message": "edited"}
+    except:
+        raise HTTPException(status_code=400, detail="Invalid message id")
+
+# ── Reactions ─────────────────────────────────────────
+@app.post("/message/{message_id}/react")
+def react_message(message_id: str, data: ReactionData):
+    try:
+        msg = messages_col.find_one({"_id": ObjectId(message_id)})
+        if not msg:
+            raise HTTPException(status_code=404, detail="Message not found")
+        reactions = msg.get("reactions", {})
+        current = reactions.get(data.username)
+        if current == data.emoji:
+            # Same emoji — toggle off
+            del reactions[data.username]
+        else:
+            reactions[data.username] = data.emoji
+        messages_col.update_one(
+            {"_id": ObjectId(message_id)},
+            {"$set": {"reactions": reactions}}
+        )
+        return {"reactions": reactions}
+    except HTTPException:
+        raise
+    except:
+        raise HTTPException(status_code=400, detail="Invalid message id")
+
+# ── Forward Message ───────────────────────────────────
+@app.post("/forward")
+def forward_message(data: ForwardData):
+    doc = {
+        "sender": data.sender,
+        "receiver": data.receiver,
+        "text": f"[FORWARD]:{data.text}",
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "read": False,
+        "deleted": False,
+        "edited": False,
+        "reactions": {},
+    }
+    result = messages_col.insert_one(doc)
+    send_push(data.receiver, data.sender, f"[FORWARD]:{data.text}")
+    return {"message": "forwarded", "id": str(result.inserted_id)}
+
+# ── Search Messages ───────────────────────────────────
+@app.get("/search/{user1}/{user2}")
+def search_messages(user1: str, user2: str, q: str):
+    if not q or len(q) < 1:
+        return []
+    msgs = messages_col.find(
+        {
+            "$or": [
+                {"sender": user1, "receiver": user2},
+                {"sender": user2, "receiver": user1}
+            ],
+            "deleted": {"$ne": True},
+            "text": {"$regex": q, "$options": "i"}
+        }
+    )
+    result = []
+    for m in msgs:
+        result.append({
+            "id": str(m["_id"]),
+            "sender": m["sender"],
+            "receiver": m["receiver"],
+            "text": m["text"],
+            "timestamp": m.get("timestamp", ""),
+            "read": m.get("read", False),
+            "edited": m.get("edited", False),
+            "reactions": m.get("reactions", {}),
+        })
+    return result
+
+# ── Media Upload (Cloudinary) ─────────────────────────
+@app.post("/upload")
+async def upload_file(
+    sender: str = Form(...),
+    receiver: str = Form(...),
+    file: UploadFile = File(...)
+):
+    try:
+        ext = file.filename.split(".")[-1].lower()
+        allowed_image = ["jpg", "jpeg", "png", "gif", "webp"]
+        allowed_video = ["mp4", "mov", "avi", "mkv"]
+        allowed_audio = ["m4a", "aac", "mp3", "wav", "ogg"]
+        allowed = allowed_image + allowed_video + allowed_audio
+
+        if ext not in allowed:
+            raise HTTPException(status_code=400, detail="File type not allowed")
+
+        is_video = ext in allowed_video
+        is_audio = ext in allowed_audio
+        resource_type = "video" if (is_video or is_audio) else "image"
+
+        file_bytes = await file.read()
+        result = cloudinary.uploader.upload(
+            file_bytes,
+            resource_type=resource_type,
+            folder="chatapp",
+            public_id=f"{sender}_{datetime.datetime.utcnow().timestamp()}",
+        )
+
+        file_url = result["secure_url"]
+        if is_video:
+            msg_text = f"[VIDEO]:{file_url}"
+        elif is_audio:
+            msg_text = f"[VOICE]:{file_url}"
+        else:
+            msg_text = f"[IMAGE]:{file_url}"
+
+        doc = {
+            "sender": sender,
+            "receiver": receiver,
+            "text": msg_text,
+            "timestamp": datetime.datetime.utcnow().isoformat(),
+            "read": False,
+            "deleted": False,
+            "edited": False,
+            "reactions": {},
+        }
+        insert_result = messages_col.insert_one(doc)
+        send_push(receiver, sender, msg_text)
+        return {"message": "uploaded", "id": str(insert_result.inserted_id), "url": file_url}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ── Typing ────────────────────────────────────────────
 @app.get("/typing/{sender}/{receiver}")

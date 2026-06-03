@@ -4,3 +4,4 @@ pymongo
 firebase-admin
 cloudinary
 python-multipart
+resend

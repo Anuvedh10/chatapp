@@ -81,21 +81,21 @@ class ForwardData(BaseModel):
     receiver: str
     text: str
 
-# ── OTP Email Helper ──────────────────────────────────
+# ── OTP Email Helper (Brevo SMTP) ─────────────────────
 def send_otp_email(to_email: str, otp: str):
-    gmail_user = os.environ.get("GMAIL_USER")
-    gmail_password = os.environ.get("GMAIL_APP_PASSWORD")
+    brevo_user = os.environ.get("BREVO_SMTP_USER")
+    brevo_password = os.environ.get("BREVO_SMTP_PASSWORD")
 
     print(f"[OTP] Sending to: {to_email}")
-    print(f"[OTP] Gmail user: {gmail_user}")
-    print(f"[OTP] Password set: {bool(gmail_password)}")
+    print(f"[OTP] Brevo user: {brevo_user}")
+    print(f"[OTP] Password set: {bool(brevo_password)}")
 
-    if not gmail_user or not gmail_password:
-        raise Exception("GMAIL_USER or GMAIL_APP_PASSWORD missing!")
+    if not brevo_user or not brevo_password:
+        raise Exception("BREVO_SMTP_USER or BREVO_SMTP_PASSWORD missing!")
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = "NexaChat – Your Verification Code"
-    msg["From"] = f"NexaChat <{gmail_user}>"
+    msg["From"] = f"NexaChat <{brevo_user}>"
     msg["To"] = to_email
 
     html = f"""
@@ -130,25 +130,16 @@ def send_otp_email(to_email: str, otp: str):
     msg.attach(MIMEText(html, "html"))
 
     try:
-        print("[OTP] Trying port 587...")
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=10) as server:
+        print("[OTP] Trying Brevo SMTP port 587...")
+        with smtplib.SMTP("smtp-relay.brevo.com", 587, timeout=10) as server:
             server.ehlo()
             server.starttls()
-            server.ehlo()
-            server.login(gmail_user, gmail_password)
-            server.sendmail(gmail_user, to_email, msg.as_string())
-            print("[OTP] Sent via port 587 ✅")
-    except Exception as e1:
-        print(f"[OTP] Port 587 failed: {e1}")
-        try:
-            print("[OTP] Trying port 465...")
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
-                server.login(gmail_user, gmail_password)
-                server.sendmail(gmail_user, to_email, msg.as_string())
-                print("[OTP] Sent via port 465 ✅")
-        except Exception as e2:
-            print(f"[OTP] Port 465 failed: {e2}")
-            raise Exception(f"Both ports failed. 587: {e1} | 465: {e2}")
+            server.login(brevo_user, brevo_password)
+            server.sendmail(brevo_user, to_email, msg.as_string())
+            print("[OTP] Sent via Brevo ✅")
+    except Exception as e:
+        print(f"[OTP] Brevo failed: {e}")
+        raise Exception(f"Brevo SMTP failed: {e}")
 
 # ── OTP Endpoints ─────────────────────────────────────
 @app.post("/send-otp")
@@ -187,11 +178,17 @@ def verify_otp(data: OtpVerify):
     record = otps_col.find_one({"email": email})
 
     if not record:
-        raise HTTPException(status_code=400, detail="No OTP found for this email. Request a new one.")
+        raise HTTPException(
+            status_code=400,
+            detail="No OTP found for this email. Request a new one."
+        )
 
     if datetime.datetime.utcnow() > record["expires_at"]:
         otps_col.delete_one({"email": email})
-        raise HTTPException(status_code=400, detail="OTP expired. Request a new one.")
+        raise HTTPException(
+            status_code=400,
+            detail="OTP expired. Request a new one."
+        )
 
     if record["otp"] != data.otp.strip():
         raise HTTPException(status_code=400, detail="Incorrect OTP. Try again.")

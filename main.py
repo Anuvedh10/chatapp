@@ -1,4 +1,3 @@
-# main.py
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -77,6 +76,20 @@ def login(user: User):
         raise HTTPException(status_code=401, detail="Invalid Username or Password")
     return {"message": "Login Successful"}
 
+@app.put("/change-password")
+def change_password(data: dict):
+    username = data.get("username")
+    old_password = data.get("old_password")
+    new_password = data.get("new_password")
+    u = users_col.find_one({"username": username, "password": old_password})
+    if not u:
+        raise HTTPException(status_code=401, detail="Current password incorrect")
+    users_col.update_one(
+        {"username": username},
+        {"$set": {"password": new_password}}
+    )
+    return {"message": "Password changed"}
+
 # ── Users ─────────────────────────────────────────────
 @app.get("/users")
 def get_users():
@@ -97,7 +110,58 @@ def get_conversations(username: str):
             contacts.add(m["sender"])
     return list(contacts)
 
-# ── FCM Token Register ────────────────────────────────
+# ── Profile ───────────────────────────────────────────
+@app.get("/profile/{username}")
+def get_profile(username: str):
+    u = users_col.find_one(
+        {"username": username},
+        {"_id": 0, "password": 0}
+    )
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {
+        "username": u.get("username", ""),
+        "bio": u.get("bio", ""),
+        "avatar_color": u.get("avatar_color", ""),
+        "photo_url": u.get("photo_url", ""),
+    }
+
+@app.put("/profile/{username}")
+def update_profile(username: str, data: dict):
+    update = {}
+    if "bio" in data:
+        update["bio"] = data["bio"]
+    if "avatar_color" in data:
+        update["avatar_color"] = data["avatar_color"]
+    if not update:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    users_col.update_one(
+        {"username": username},
+        {"$set": update}
+    )
+    return {"message": "Profile updated"}
+
+@app.post("/profile/{username}/photo")
+async def upload_profile_photo(username: str, file: UploadFile = File(...)):
+    try:
+        contents = await file.read()
+        result = cloudinary.uploader.upload(
+            contents,
+            folder="chatapp/avatars",
+            public_id=f"avatar_{username}",
+            overwrite=True,
+            resource_type="image",
+        )
+        url = result["secure_url"]
+        users_col.update_one(
+            {"username": username},
+            {"$set": {"photo_url": url}}
+        )
+        return {"url": url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ── FCM Token ─────────────────────────────────────────
 @app.post("/register-token")
 def register_token(data: TokenData):
     tokens_col.update_one(
@@ -112,7 +176,7 @@ def register_token(data: TokenData):
 def get_version():
     return {"min_version": "1.0.0", "latest_version": "1.0.0"}
 
-# ── Push Notification Helper ──────────────────────────
+# ── Push Notification ─────────────────────────────────
 def send_push(receiver: str, sender: str, text: str):
     try:
         doc = tokens_col.find_one({"username": receiver})
@@ -214,7 +278,6 @@ def delete_message(message_id: str):
     except:
         raise HTTPException(status_code=400, detail="Invalid message id")
 
-# ── Edit Message ──────────────────────────────────────
 @app.put("/message/{message_id}/edit")
 def edit_message(message_id: str, data: EditData):
     try:
@@ -226,7 +289,6 @@ def edit_message(message_id: str, data: EditData):
     except:
         raise HTTPException(status_code=400, detail="Invalid message id")
 
-# ── Reactions ─────────────────────────────────────────
 @app.post("/message/{message_id}/react")
 def react_message(message_id: str, data: ReactionData):
     try:
@@ -236,7 +298,6 @@ def react_message(message_id: str, data: ReactionData):
         reactions = msg.get("reactions", {})
         current = reactions.get(data.username)
         if current == data.emoji:
-            # Same emoji — toggle off
             del reactions[data.username]
         else:
             reactions[data.username] = data.emoji
@@ -250,7 +311,6 @@ def react_message(message_id: str, data: ReactionData):
     except:
         raise HTTPException(status_code=400, detail="Invalid message id")
 
-# ── Forward Message ───────────────────────────────────
 @app.post("/forward")
 def forward_message(data: ForwardData):
     doc = {
@@ -267,7 +327,6 @@ def forward_message(data: ForwardData):
     send_push(data.receiver, data.sender, f"[FORWARD]:{data.text}")
     return {"message": "forwarded", "id": str(result.inserted_id)}
 
-# ── Search Messages ───────────────────────────────────
 @app.get("/search/{user1}/{user2}")
 def search_messages(user1: str, user2: str, q: str):
     if not q or len(q) < 1:
@@ -296,7 +355,6 @@ def search_messages(user1: str, user2: str, q: str):
         })
     return result
 
-# ── Media Upload (Cloudinary) ─────────────────────────
 @app.post("/upload")
 async def upload_file(
     sender: str = Form(...),
@@ -371,20 +429,6 @@ def set_typing(sender: str, receiver: str):
         upsert=True
     )
     return {"ok": True}
-
-@app.put("/change-password")
-def change_password(data: dict):
-    username = data.get("username")
-    old_password = data.get("old_password")
-    new_password = data.get("new_password")
-    u = users_col.find_one({"username": username, "password": old_password})
-    if not u:
-        raise HTTPException(status_code=401, detail="Current password incorrect")
-    users_col.update_one(
-        {"username": username},
-        {"$set": {"password": new_password}}
-    )
-    return {"message": "Password changed"}
 
 @app.delete("/clear-chat/{user1}/{user2}")
 def clear_chat(user1: str, user2: str):

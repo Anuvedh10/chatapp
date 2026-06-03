@@ -1,7 +1,7 @@
 import random
-import smtplib
 import os
 import datetime
+import resend
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -81,22 +81,15 @@ class ForwardData(BaseModel):
     receiver: str
     text: str
 
-# ── OTP Email Helper (Brevo SMTP) ─────────────────────
+# ── OTP Email Helper (Resend API) ─────────────────────
 def send_otp_email(to_email: str, otp: str):
-    brevo_user = os.environ.get("BREVO_SMTP_USER")
-    brevo_password = os.environ.get("BREVO_SMTP_PASSWORD")
+    resend.api_key = os.environ.get("RESEND_API_KEY")
 
     print(f"[OTP] Sending to: {to_email}")
-    print(f"[OTP] Brevo user: {brevo_user}")
-    print(f"[OTP] Password set: {bool(brevo_password)}")
+    print(f"[OTP] Resend API key set: {bool(resend.api_key)}")
 
-    if not brevo_user or not brevo_password:
-        raise Exception("BREVO_SMTP_USER or BREVO_SMTP_PASSWORD missing!")
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = "NexaChat – Your Verification Code"
-    msg["From"] = f"NexaChat <{brevo_user}>"
-    msg["To"] = to_email
+    if not resend.api_key:
+        raise Exception("RESEND_API_KEY missing!")
 
     html = f"""
     <html>
@@ -127,19 +120,19 @@ def send_otp_email(to_email: str, otp: str):
     </body>
     </html>
     """
-    msg.attach(MIMEText(html, "html"))
 
     try:
-        print("[OTP] Trying Brevo SMTP port 587...")
-        with smtplib.SMTP("smtp-relay.brevo.com", 587, timeout=10) as server:
-            server.ehlo()
-            server.starttls()
-            server.login(brevo_user, brevo_password)
-            server.sendmail(brevo_user, to_email, msg.as_string())
-            print("[OTP] Sent via Brevo ✅")
+        params = {
+            "from": "NexaChat <onboarding@resend.dev>",
+            "to": [to_email],
+            "subject": "NexaChat – Your Verification Code",
+            "html": html,
+        }
+        email = resend.Emails.send(params)
+        print(f"[OTP] Sent via Resend ✅ id: {email['id']}")
     except Exception as e:
-        print(f"[OTP] Brevo failed: {e}")
-        raise Exception(f"Brevo SMTP failed: {e}")
+        print(f"[OTP] Resend failed: {e}")
+        raise Exception(f"Resend API failed: {e}")
 
 # ── OTP Endpoints ─────────────────────────────────────
 @app.post("/send-otp")

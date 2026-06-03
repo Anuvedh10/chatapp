@@ -83,8 +83,15 @@ class ForwardData(BaseModel):
 
 # ── OTP Email Helper ──────────────────────────────────
 def send_otp_email(to_email: str, otp: str):
-    gmail_user = os.environ["GMAIL_USER"]
-    gmail_password = os.environ["GMAIL_APP_PASSWORD"]
+    gmail_user = os.environ.get("GMAIL_USER")
+    gmail_password = os.environ.get("GMAIL_APP_PASSWORD")
+
+    print(f"[OTP] Sending to: {to_email}")
+    print(f"[OTP] Gmail user: {gmail_user}")
+    print(f"[OTP] Password set: {bool(gmail_password)}")
+
+    if not gmail_user or not gmail_password:
+        raise Exception("GMAIL_USER or GMAIL_APP_PASSWORD missing!")
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = "NexaChat – Your Verification Code"
@@ -122,9 +129,26 @@ def send_otp_email(to_email: str, otp: str):
     """
     msg.attach(MIMEText(html, "html"))
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(gmail_user, gmail_password)
-        server.sendmail(gmail_user, to_email, msg.as_string())
+    try:
+        print("[OTP] Trying port 587...")
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=10) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(gmail_user, gmail_password)
+            server.sendmail(gmail_user, to_email, msg.as_string())
+            print("[OTP] Sent via port 587 ✅")
+    except Exception as e1:
+        print(f"[OTP] Port 587 failed: {e1}")
+        try:
+            print("[OTP] Trying port 465...")
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
+                server.login(gmail_user, gmail_password)
+                server.sendmail(gmail_user, to_email, msg.as_string())
+                print("[OTP] Sent via port 465 ✅")
+        except Exception as e2:
+            print(f"[OTP] Port 465 failed: {e2}")
+            raise Exception(f"Both ports failed. 587: {e1} | 465: {e2}")
 
 # ── OTP Endpoints ─────────────────────────────────────
 @app.post("/send-otp")
@@ -204,7 +228,6 @@ def register(data: UserWithEmail):
     })
 
     otps_col.delete_one({"email": email})
-
     return {"message": "Registration Successful"}
 
 @app.post("/login")
@@ -586,4 +609,3 @@ def clear_chat(user1: str, user2: str):
         {"$set": {"deleted": True}}
     )
     return {"message": "Chat cleared"}
-

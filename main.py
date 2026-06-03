@@ -1,10 +1,16 @@
+import random
+import smtplib
+import os
+import datetime
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pymongo import MongoClient
 from bson import ObjectId
-import os
-import datetime
+
 import cloudinary
 import cloudinary.uploader
 import firebase_admin
@@ -18,27 +24,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MongoDB
+# ── MongoDB ───────────────────────────────────────────
 client = MongoClient(os.environ["MONGO_URI"])
 db = client["chatapp"]
 users_col = db["users"]
 messages_col = db["messages"]
 tokens_col = db["tokens"]
+otps_col = db["otps"]
 
-# Firebase Admin Init
+# ── Firebase Admin ────────────────────────────────────
 cred = credentials.Certificate("/etc/secrets/serviceAccountKey.json")
 firebase_admin.initialize_app(cred)
 
-# Cloudinary Init
+# ── Cloudinary ────────────────────────────────────────
 cloudinary.config(
     cloud_name=os.environ["CLOUDINARY_CLOUD_NAME"],
     api_key=os.environ["CLOUDINARY_API_KEY"],
     api_secret=os.environ["CLOUDINARY_API_SECRET"],
 )
 
+# ── Models ────────────────────────────────────────────
 class User(BaseModel):
     username: str
     password: str
+
+class UserWithEmail(BaseModel):
+    username: str
+    password: str
+    email: str
+
+class OtpRequest(BaseModel):
+    email: str
+
+class OtpVerify(BaseModel):
+    email: str
+    otp: str
 
 class Message(BaseModel):
     sender: str
@@ -61,12 +81,130 @@ class ForwardData(BaseModel):
     receiver: str
     text: str
 
+# ── OTP Email Helper ──────────────────────────────────
+def send_otp_email(to_email: str, otp: str):
+    gmail_user = os.environ["GMAIL_USER"]
+    gmail_password = os.environ["GMAIL_APP_PASSWORD"]
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = "NexaChat – Your Verification Code"
+    msg["From"] = f"NexaChat <{gmail_user}>"
+    msg["To"] = to_email
+
+    html = f"""
+    <html>
+    <body style="font-family:Arial,sans-serif;background:#f5f5f5;padding:30px;margin:0">
+      <div style="max-width:420px;margin:auto;background:white;
+                  border-radius:16px;padding:36px;box-shadow:0 2px 12px rgba(0,0,0,0.08)">
+        <div style="text-align:center;margin-bottom:24px">
+          <h1 style="color:#1A1A2E;font-size:28px;margin:0">NexaChat</h1>
+          <p style="color:#888;font-size:14px;margin:4px 0 0">Verification Code</p>
+        </div>
+        <p style="color:#444;font-size:15px">
+          Use the code below to verify your Gmail and create your NexaChat account.
+        </p>
+        <div style="background:#f0f0f5;border-radius:12px;padding:24px;
+                    text-align:center;margin:24px 0">
+          <span style="font-size:40px;font-weight:bold;letter-spacing:12px;
+                       color:#1A1A2E;font-family:monospace">{otp}</span>
+        </div>
+        <p style="color:#888;font-size:13px;text-align:center">
+          This code expires in <b>10 minutes</b>.<br>
+          If you didn't request this, you can safely ignore this email.
+        </p>
+        <hr style="border:none;border-top:1px solid #eee;margin:24px 0">
+        <p style="color:#bbb;font-size:11px;text-align:center">
+          NexaChat · Contact us on Instagram @anuvedhh
+        </p>
+      </div>
+    </body>
+    </html>
+    """
+    msg.attach(MIMEText(html, "html"))
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(gmail_user, gmail_password)
+        server.sendmail(gmail_user, to_email, msg.as_string())
+
+# ── OTP Endpoints ─────────────────────────────────────
+@app.post("/send-otp")
+def send_otp(data: OtpRequest):
+    email = data.email.strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Invalid email address")
+
+    if users_col.find_one({"email": email}):
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    otp = str(random.randint(100000, 999999))
+    expires_at = datetime.datetime.utcnow() + datetime.timedelta(minutes=10)
+
+    otps_col.update_one(
+        {"email": email},
+        {"$set": {
+            "email": email,
+            "otp": otp,
+            "expires_at": expires_at,
+            "verified": False
+        }},
+        upsert=True
+    )
+
+    try:
+        send_otp_email(email, otp)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
+
+    return {"message": "OTP sent successfully"}
+
+@app.post("/verify-otp")
+def verify_otp(data: OtpVerify):
+    email = data.email.strip().lower()
+    record = otps_col.find_one({"email": email})
+
+    if not record:
+        raise HTTPException(status_code=400, detail="No OTP found for this email. Request a new one.")
+
+    if datetime.datetime.utcnow() > record["expires_at"]:
+        otps_col.delete_one({"email": email})
+        raise HTTPException(status_code=400, detail="OTP expired. Request a new one.")
+
+    if record["otp"] != data.otp.strip():
+        raise HTTPException(status_code=400, detail="Incorrect OTP. Try again.")
+
+    otps_col.update_one({"email": email}, {"$set": {"verified": True}})
+    return {"message": "OTP verified successfully"}
+
 # ── Auth ──────────────────────────────────────────────
 @app.post("/register")
-def register(user: User):
-    if users_col.find_one({"username": user.username}):
+def register(data: UserWithEmail):
+    email = data.email.strip().lower()
+
+    otp_record = otps_col.find_one({"email": email})
+    if not otp_record or not otp_record.get("verified"):
+        raise HTTPException(
+            status_code=400,
+            detail="Email not verified. Please complete OTP verification first."
+        )
+
+    if users_col.find_one({"username": data.username}):
         raise HTTPException(status_code=400, detail="Username already exists")
-    users_col.insert_one({"username": user.username, "password": user.password})
+
+    if users_col.find_one({"email": email}):
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    users_col.insert_one({
+        "username": data.username,
+        "password": data.password,
+        "email": email,
+        "bio": "",
+        "avatar_color": "",
+        "photo_url": "",
+        "created_at": datetime.datetime.utcnow().isoformat(),
+    })
+
+    otps_col.delete_one({"email": email})
+
     return {"message": "Registration Successful"}
 
 @app.post("/login")
@@ -74,7 +212,11 @@ def login(user: User):
     u = users_col.find_one({"username": user.username, "password": user.password})
     if not u:
         raise HTTPException(status_code=401, detail="Invalid Username or Password")
-    return {"message": "Login Successful"}
+    return {
+        "message": "Login Successful",
+        "username": u.get("username", ""),
+        "email": u.get("email", ""),
+    }
 
 @app.put("/change-password")
 def change_password(data: dict):
@@ -403,7 +545,11 @@ async def upload_file(
         }
         insert_result = messages_col.insert_one(doc)
         send_push(receiver, sender, msg_text)
-        return {"message": "uploaded", "id": str(insert_result.inserted_id), "url": file_url}
+        return {
+            "message": "uploaded",
+            "id": str(insert_result.inserted_id),
+            "url": file_url
+        }
 
     except HTTPException:
         raise
@@ -440,3 +586,4 @@ def clear_chat(user1: str, user2: str):
         {"$set": {"deleted": True}}
     )
     return {"message": "Chat cleared"}
+

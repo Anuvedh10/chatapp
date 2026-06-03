@@ -371,3 +371,28 @@ def set_typing(sender: str, receiver: str):
         upsert=True
     )
     return {"ok": True}
+
+@app.put("/change-password")
+def change_password(data: dict):
+    username = data.get("username")
+    old_password = data.get("old_password")
+    new_password = data.get("new_password")
+    u = users_col.find_one({"username": username, "password": old_password})
+    if not u:
+        raise HTTPException(status_code=401, detail="Current password incorrect")
+    users_col.update_one(
+        {"username": username},
+        {"$set": {"password": new_password}}
+    )
+    return {"message": "Password changed"}
+
+@app.delete("/clear-chat/{user1}/{user2}")
+def clear_chat(user1: str, user2: str):
+    messages_col.update_many(
+        {"$or": [
+            {"sender": user1, "receiver": user2},
+            {"sender": user2, "receiver": user1}
+        ]},
+        {"$set": {"deleted": True}}
+    )
+    return {"message": "Chat cleared"}

@@ -4,6 +4,7 @@ import os
 import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -51,7 +52,7 @@ class User(BaseModel):
 class UserWithEmail(BaseModel):
     username: str
     password: str
-    email: str
+    email: Optional[str] = None
 
 class OtpRequest(BaseModel):
     email: str

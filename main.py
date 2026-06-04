@@ -4,7 +4,6 @@ import os
 import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from typing import Optional
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -52,7 +51,7 @@ class User(BaseModel):
 class UserWithEmail(BaseModel):
     username: str
     password: str
-    email: Optional[str] = None
+    email: str
 
 class OtpRequest(BaseModel):
     email: str
@@ -179,15 +178,14 @@ def verify_otp(data: OtpVerify):
 # ── Auth ──────────────────────────────────────────────
 @app.post("/register")
 def register(data: UserWithEmail):
-    email = data.email.strip().lower() if data.email else None
+    email = data.email.strip().lower()
 
-    if email:
-        otp_record = otps_col.find_one({"email": email})
-        if not otp_record or not otp_record.get("verified"):
-            raise HTTPException(
-                status_code=400,
-                detail="Email not verified. Please complete OTP verification first."
-            )
+    otp_record = otps_col.find_one({"email": email})
+    if not otp_record or not otp_record.get("verified"):
+        raise HTTPException(
+            status_code=400,
+            detail="Email not verified. Please complete OTP verification first."
+        )
 
     if users_col.find_one({"username": data.username}):
         raise HTTPException(status_code=400, detail="Username already exists")

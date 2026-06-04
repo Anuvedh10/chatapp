@@ -84,8 +84,10 @@ class ForwardData(BaseModel):
 # ── OTP Email Helper (Resend API) ─────────────────────
 def send_otp_email(to_email: str, otp: str):
     resend.api_key = os.environ.get("RESEND_API_KEY")
+    from_email = os.environ.get("RESEND_FROM_EMAIL", "anuvedhpathiyantavida@gmail.com")
 
     print(f"[OTP] Sending to: {to_email}")
+    print(f"[OTP] From: {from_email}")
     print(f"[OTP] Resend API key set: {bool(resend.api_key)}")
 
     if not resend.api_key:
@@ -123,7 +125,7 @@ def send_otp_email(to_email: str, otp: str):
 
     try:
         params = {
-            "from": "NexaChat <onboarding@resend.dev>",
+            "from": f"NexaChat <{from_email}>",
             "to": [to_email],
             "subject": "NexaChat – Your Verification Code",
             "html": html,
